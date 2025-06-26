@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
-import openpyxl
+# openpyxl
 st.title('Offer Data Processing App')
 
 # File uploaders
