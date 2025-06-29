@@ -125,6 +125,10 @@ if all([schema_file, offer_file, offer_ar_file, merchant_file, location_file, of
         if filtered_df.empty:
             st.warning("⚠️ No matching offers found for the given IDs.")
         else:
+            # --- Remove specified columns before export ---
+            columns_to_remove = ['cdf_offer_id', 'cdf_merchant_id']
+            filtered_df = filtered_df.drop(columns=columns_to_remove, errors='ignore')
+
             # --- Export filtered data to Excel in-memory ---
             output = io.BytesIO()
             filtered_df.to_excel(output, index=False)
@@ -149,4 +153,3 @@ elif not offer_ids_input:
 
 else:
     st.info("ℹ️ Please upload all required input files.")
-
