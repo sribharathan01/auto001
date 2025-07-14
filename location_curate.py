@@ -7,7 +7,7 @@ import re
 from io import BytesIO
 
 # --- CONFIGURATION ---
-API_KEY = 'YOUR_API_KEY'  # Replace with your actual Google API key
+API_KEY = 'AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc'  # Replace with your actual Google API key
 VALIDATION_ENDPOINT = f'https://addressvalidation.googleapis.com/v1:validateAddress?key={API_KEY}'
 GEOCODE_ENDPOINT = f'https://maps.googleapis.com/maps/api/geocode/json'
 REVERSE_GEOCODE_ENDPOINT = f'https://maps.googleapis.com/maps/api/geocode/json'
