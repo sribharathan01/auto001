@@ -6,20 +6,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 from io import BytesIO
 
-# --- CONFIGURATION ---
-API_KEY = 'AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc'  # Replace with your actual Google API key
-VALIDATION_ENDPOINT = f'https://addressvalidation.googleapis.com/v1:validateAddress?key={API_KEY}'
-GEOCODE_ENDPOINT = f'https://maps.googleapis.com/maps/api/geocode/json'
-REVERSE_GEOCODE_ENDPOINT = f'https://maps.googleapis.com/maps/api/geocode/json'
-
 # --- HELPERS ---
 def is_valid_indian_pincode(pin):
     return bool(re.match(r'^[1-9][0-9]{5}$', str(pin)))
 
-def geocode_address(address):
-    params = {'address': address, 'key': API_KEY}
+def google_geocode_address(address, api_key):
     try:
-        response = requests.get(GEOCODE_ENDPOINT, params=params)
+        params = {'address': address, 'key': api_key}
+        response = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
         data = response.json()
         if data.get('status') == 'OK':
             location = data['results'][0]['geometry']['location']
@@ -28,20 +22,29 @@ def geocode_address(address):
         pass
     return None, None, False
 
-def reverse_geocode_zipcode(lat, lon):
-    params = {'latlng': f'{lat},{lon}', 'key': API_KEY}
+def google_reverse_geocode(lat, lon, api_key):
+    """Returns (city, state, postal_code) from lat/lon via reverse geocoding"""
     try:
-        response = requests.get(REVERSE_GEOCODE_ENDPOINT, params=params)
+        params = {'latlng': f'{lat},{lon}', 'key': api_key}
+        response = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
         data = response.json()
         if data.get('status') == 'OK':
-            for component in data['results'][0]['address_components']:
-                if 'postal_code' in component['types']:
-                    return component['long_name']
+            components = data['results'][0]['address_components']
+            city = state = postal_code = None
+            for comp in components:
+                if 'locality' in comp['types']:
+                    city = comp['long_name']
+                if 'administrative_area_level_1' in comp['types']:
+                    state = comp['long_name']
+                if 'postal_code' in comp['types']:
+                    postal_code = comp['long_name']
+            return city, state, postal_code
     except Exception:
         pass
-    return None
+    return None, None, None
 
-def validate_address(address, retries=3):
+def validate_address(address, api_key, retries=3):
+    endpoint = f'https://addressvalidation.googleapis.com/v1:validateAddress?key={api_key}'
     payload = {
         "address": {
             "regionCode": "IN",
@@ -50,8 +53,9 @@ def validate_address(address, retries=3):
     }
     for attempt in range(retries):
         try:
-            response = requests.post(VALIDATION_ENDPOINT, json=payload)
+            response = requests.post(endpoint, json=payload)
             data = response.json()
+
             if response.status_code == 429:
                 time.sleep(5)
                 continue
@@ -67,36 +71,41 @@ def validate_address(address, retries=3):
             used_fallback = False
 
             if lat is None or lon is None:
-                lat, lon, used_fallback = geocode_address(address)
+                lat, lon, used_fallback = google_geocode_address(address, api_key)
 
+            city = postal.get('locality')
+            state = postal.get('administrativeArea')
             zipcode = postal.get('postalCode')
 
-            # --- PIN CODE VALIDATION AND REVERSE GEOCODING FALLBACK ---
-            if not is_valid_indian_pincode(zipcode):
+            # --- REVERSE GEOCODE IF ANY FIELD IS MISSING ---
+            if (not is_valid_indian_pincode(zipcode)) or not city or not state:
                 if lat and lon:
-                    zipcode_rev = reverse_geocode_zipcode(lat, lon)
-                    if is_valid_indian_pincode(zipcode_rev):
-                        zipcode = zipcode_rev
-                        status = 'Success (Reverse Geocoding)'
-                    else:
-                        status = 'Zipcode Not Found'
+                    city_rev, state_rev, postal_code_rev = google_reverse_geocode(lat, lon, api_key)
+
+                    city = city or city_rev
+                    state = state or state_rev
+                    if not is_valid_indian_pincode(zipcode):
+                        zipcode = postal_code_rev if is_valid_indian_pincode(postal_code_rev) else None
+
+                    status = 'Reverse Geocoding Fallback Used'
                 else:
-                    status = 'Zipcode Not Found'
+                    status = 'Missing Location Info'
             else:
                 status = 'Success'
 
             if used_fallback:
-                status += ' (Fallback Geocoding Used)'
+                status += ' (Lat/Lon Fallback Used)'
 
             return {
-                'City': postal.get('locality'),
-                'State': postal.get('administrativeArea'),
+                'City': city,
+                'State': state,
                 'Postal Code': zipcode,
                 'Latitude': lat,
                 'Longitude': lon,
                 'Used_Fallback_Geocoding': used_fallback,
                 'Status': status
             }
+
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(2)
@@ -112,14 +121,17 @@ def validate_address(address, retries=3):
                     'Error': str(e)
                 }
 
-def process_row(row, address_column):
+def process_row(row, address_column, api_key):
     address = str(row[address_column])
-    return validate_address(address)
+    return validate_address(address, api_key)
 
-def process_addresses(df, address_column, max_workers=10):
+def process_addresses(df, address_column, api_key, max_workers=10):
     results = [None] * len(df)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_row, row, address_column): idx for idx, row in df.iterrows()}
+        futures = {
+            executor.submit(process_row, row, address_column, api_key): idx
+            for idx, row in df.iterrows()
+        }
         progress = st.progress(0)
         completed = 0
         for future in as_completed(futures):
@@ -134,42 +146,45 @@ def process_addresses(df, address_column, max_workers=10):
     return results
 
 # --- STREAMLIT UI ---
-st.title("Bulk Address Validation & Geocoding (India)")
+st.title("🗺️ Bulk Address Validation, Geocoding & Reverse Cleanup")
 
-st.markdown(
-    """
-    Upload an Excel file containing addresses.<br>
-    The script will validate, geocode, and extract postal codes with fallbacks.<br>
-    <b>Note:</b> Your Google API key quota and rate limits apply.
-    """,
-    unsafe_allow_html=True,
-)
+api_key = st.text_input("🔐 Enter your Google Maps API Key", type="password")
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
-address_column = st.text_input("Column name containing addresses", value="Address")
-max_workers = st.slider("Parallel workers", min_value=1, max_value=20, value=10)
+st.markdown("""
+Upload a file with addresses, and we’ll enrich missing City, State, Postal Code using:
+- 🔹 Address Validation API
+- 🔹 Geocoding fallback
+- 🔹 Full reverse geocoding cleanup  
+""")
+
+uploaded_file = st.file_uploader("📎 Upload Excel File", type=["xlsx"])
+address_column = st.text_input("🔤 Column containing addresses", value="Address")
+max_workers = st.slider("⚙️ Parallel Threads", min_value=1, max_value=20, value=10)
 
 if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-    st.write("Preview of uploaded data:", df.head())
+    if not api_key:
+        st.warning("Please enter your Google API key to continue.")
+    else:
+        df = pd.read_excel(uploaded_file)
+        st.info(f"Loaded {len(df)} rows.")
+        st.write("📌 Preview of your data:", df.head())
 
-    if st.button("Start Processing"):
-        st.info("Processing addresses. Please wait...")
-        results = process_addresses(df, address_column, max_workers=max_workers)
-        results_df = pd.DataFrame(results)
-        final_df = pd.concat([df, results_df], axis=1)
-        st.success("Processing complete!")
+        if st.button("🚀 Start Processing"):
+            st.info("Processing addresses...")
+            results = process_addresses(df, address_column, api_key, max_workers=max_workers)
+            results_df = pd.DataFrame(results)
+            final_df = pd.concat([df, results_df], axis=1)
+            st.success("✅ Address processing complete.")
 
-        # Show a preview
-        st.write(final_df.head())
+            st.write("📄 Preview of Results:", final_df.head())
 
-        # Download link
-        output = BytesIO()
-        final_df.to_excel(output, index=False)
-        output.seek(0)
-        st.download_button(
-            label="Download Results as Excel",
-            data=output,
-            file_name="validated_addresses_output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            buffer = BytesIO()
+            final_df.to_excel(buffer, index=False)
+            buffer.seek(0)
+
+            st.download_button(
+                label="⬇️ Download Enriched Excel",
+                data=buffer,
+                file_name="validated_addresses_output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
