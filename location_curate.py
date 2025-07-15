@@ -1,42 +1,60 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import re
 from io import BytesIO
 
-# --- CONFIGURATION ---
-API_KEY = 'AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc'  # 🎯 Replace this with your actual Google Maps API key
-GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json'
-REVERSE_GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json'
+# --- PROVIDER SELECTION UI ---
+st.set_page_config(layout="wide")
+st.title("🌎 Global Address Validator & Enricher")
 
+provider = st.selectbox("Select Geocoding Provider", ["Google Maps", "Mapbox"])
 
-# --- HELPERS ---
-def geocode_address_from_fields(address, city, state, postal_code, country):
-    """
-    Try to geocode using whatever address components are available.
-    """
+if provider == "Google Maps":
+    api_key = st.text_input("AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc", value="", type="password")
+else:
+    api_key = st.text_input("pk.eyJ1Ijoic3JpYmhhcmF0aGFuIiwiYSI6ImNtY2xudXZmeTBhMXUycXNkMml0Z2F1YjAifQ.QI6GXw21q7uWZAotQSrW6w", value="", type="password")
+
+if not api_key:
+    st.warning("Please enter a valid API key or token to continue.")
+    st.stop()
+
+# --- Google Geocoding ---
+def geocode_address_google(address, city, state, postal_code, country, api_key):
     components = [address, city, state, postal_code, country]
     query = ', '.join([str(part).strip() for part in components if part])
-    params = {'address': query, 'key': API_KEY}
-
+    params = {'address': query, 'key': api_key}
     try:
-        res = requests.get(GEOCODE_ENDPOINT, params=params)
+        res = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
         data = res.json()
         if data.get('status') == 'OK' and data['results']:
             loc = data['results'][0]['geometry']['location']
-            return loc.get('lat'), loc.get('lng'), True
-    except Exception:
+            return loc['lat'], loc['lng'], True
+    except Exception as e:
         pass
     return None, None, False
 
-
-def reverse_geocode(lat, lon):
-    """Convert latitude and longitude to address components."""
+# --- Mapbox Geocoding ---
+def geocode_address_mapbox(address, city, state, postal_code, country, api_key):
+    components = [address, city, state, postal_code, country]
+    query = ', '.join([str(part).strip() for part in components if part])
+    url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{requests.utils.quote(query)}.json"
+    params = {'access_token': api_key}
     try:
-        params = {'latlng': f'{lat},{lon}', 'key': API_KEY}
-        res = requests.get(REVERSE_GEOCODE_ENDPOINT, params=params)
+        res = requests.get(url, params=params)
+        data = res.json()
+        if data.get('features'):
+            coords = data['features'][0]['geometry']['coordinates']  # [lon, lat]
+            return coords[1], coords[0], True
+    except Exception as e:
+        pass
+    return None, None, False
+
+# --- Google Reverse Geocoding ---
+def reverse_geocode_google(lat, lon, api_key):
+    params = {'latlng': f'{lat},{lon}', 'key': api_key}
+    try:
+        res = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
         data = res.json()
         if data.get('status') == 'OK' and data['results']:
             components = data['results'][0]['address_components']
@@ -51,12 +69,35 @@ def reverse_geocode(lat, lon):
                 if 'country' in comp['types']:
                     country = comp['long_name']
             return city, state, postal, country
-    except Exception:
+    except Exception as e:
         pass
     return None, None, None, None
 
+# --- Mapbox Reverse Geocoding ---
+def reverse_geocode_mapbox(lat, lon, api_key):
+    url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
+    params = {'access_token': api_key}
+    try:
+        res = requests.get(url, params=params)
+        data = res.json()
+        city, state, postal, country = None, None, None, None
+        if data.get('features'):
+            for feat in data['features']:
+                types = feat.get('place_type', [])
+                if 'place' in types and not city:
+                    city = feat['text']
+                if 'region' in types and not state:
+                    state = feat['text']
+                if 'postcode' in types and not postal:
+                    postal = feat['text']
+                if 'country' in types and not country:
+                    country = feat['text']
+        return city, state, postal, country
+    except Exception as e:
+        pass
+    return None, None, None, None
 
-# --- MAIN VALIDATION FUNCTION ---
+# --- Main Enrichment Function ---
 def validate_and_enrich(row):
     address = row.get("Address", "") or ""
     city = row.get("City", "") or ""
@@ -65,34 +106,36 @@ def validate_and_enrich(row):
     country = row.get("Country", "") or ""
     lat = row.get("Latitude")
     lon = row.get("Longitude")
-
     notes = []
     used_fallback = False
 
-    # Step 1: If lat/lon is missing, try to geocode full address
+    # Step 1: Geocoding
     if not lat or not lon:
-        lat1, lon1, success = geocode_address_from_fields(address, city, state, postal, country)
+        if provider == "Google Maps":
+            lat1, lon1, success = geocode_address_google(address, city, state, postal, country, api_key)
+        else:
+            lat1, lon1, success = geocode_address_mapbox(address, city, state, postal, country, api_key)
         if success:
             lat, lon = lat1, lon1
             used_fallback = True
-            notes.append("Lat/Lon from geocoding all fields")
+            notes.append("Lat/Lon from geocoding")
 
-    # Step 2: If lat/lon exists but other fields missing, try reverse geocoding
+    # Step 2: Reverse Geocoding
     if lat and lon:
-        r_city, r_state, r_postal, r_country = reverse_geocode(lat, lon)
+        if provider == "Google Maps":
+            r_city, r_state, r_postal, r_country = reverse_geocode_google(lat, lon, api_key)
+        else:
+            r_city, r_state, r_postal, r_country = reverse_geocode_mapbox(lat, lon, api_key)
 
         if not city and r_city:
             city = r_city
             notes.append("City from reverse geocoding")
-
         if not state and r_state:
             state = r_state
             notes.append("State from reverse geocoding")
-
         if not postal and r_postal:
             postal = r_postal
-            notes.append("Postal Code from reverse geocoding")
-
+            notes.append("Postal code from reverse geocoding")
         if not country and r_country:
             country = r_country
             notes.append("Country from reverse geocoding")
@@ -109,9 +152,8 @@ def validate_and_enrich(row):
         "Status": "Success" if lat and lon else "Partial/Failed"
     }
 
-
-# --- MULTI-THREAD WORKER ---
-def process_addresses(df, address_col, max_workers):
+# --- Threaded Address Processor ---
+def process_addresses(df, max_workers):
     results = [None] * len(df)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(validate_and_enrich, row): idx for idx, row in df.iterrows()}
@@ -126,41 +168,29 @@ def process_addresses(df, address_col, max_workers):
             progress.progress((count + 1) / len(df))
     return pd.DataFrame(results)
 
-
-# --- STREAMLIT UI ---
-st.set_page_config(layout="wide")
-st.title("🌍 Global Address Validator & Enricher")
-
-st.markdown("""
-Upload an Excel file with addresses to enrich missing values like:
-- 📌 Latitude / Longitude
-- 🏙 City, State
-- 🌎 Country and Postal Code
-
-Powered by Google Maps APIs 🌐  
-Note: You **must enter your API key** in the script for this to work.
-
-""", unsafe_allow_html=True)
-
-uploaded_file = st.file_uploader("📂 Upload Excel file", type=["xlsx"])
-address_col = st.text_input("📬 Column name for full address:", value="Address")
-max_workers = st.slider("🚀 Parallel threads", 2, 20, 10)
+# --- Streamlit UI: File Upload & Process ---
+st.markdown("Upload an Excel file to enrich missing address values using selected provider.")
+uploaded_file = st.file_uploader("📂 Upload Excel File", type=["xlsx"])
+max_workers = st.slider("🧵 Max Parallel Threads", 2, 20, 10)
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    st.write("📄 File loaded. Preview below:")
+    st.info("✅ File Loaded. Preview below 👇")
     st.dataframe(df.head())
 
-    if st.button("▶️ Start Validation"):
-        st.info("Working... Please wait.")
-        result_df = process_addresses(df, address_col, max_workers)
+    if st.button("🚀 Start Address Enrichment"):
+        st.info("Please wait, processing...")
+        result_df = process_addresses(df, max_workers)
         final_df = pd.concat([df.reset_index(drop=True), result_df], axis=1)
-        st.success("✅ Done!")
-        st.dataframe(final_df.head())
+        st.success("✅ Enrichment Complete!")
+        st.write(final_df.head())
 
         output = BytesIO()
         final_df.to_excel(output, index=False)
         output.seek(0)
-
-        st.download_button("⬇️ Download Result", data=output, file_name="validated_addresses.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(
+            label="⬇️ Download Results",
+            data=output,
+            file_name="enriched_addresses.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
