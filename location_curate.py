@@ -5,135 +5,157 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 
-# --- India Reference Data ---
-VALID_STATES = {
-    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa",
-    "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala",
-    "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland",
-    "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura",
-    "Uttar Pradesh", "Uttarakhand", "West Bengal", "Delhi", "Puducherry", "Chandigarh",
-    "Jammu and Kashmir", "Ladakh", "Andaman and Nicobar Islands", "Dadra and Nagar Haveli and Daman and Diu"
+# ---------------------------------------------
+# INDIA VALIDATION - Defaults, States, Cities
+# ---------------------------------------------
+DEFAULT_CITY_DATA = {
+    'Delhi': {'state': 'Delhi', 'pincode': '110001', 'latitude': 28.6139, 'longitude': 77.2090},
+    'Mumbai': {'state': 'Maharashtra', 'pincode': '400001', 'latitude': 18.9388, 'longitude': 72.8354},
+    'Bengaluru': {'state': 'Karnataka', 'pincode': '560001', 'latitude': 12.9719, 'longitude': 77.5937},
+    'Chennai': {'state': 'Tamil Nadu', 'pincode': '600001', 'latitude': 13.0827, 'longitude': 80.2707},
+    'Hyderabad': {'state': 'Telangana', 'pincode': '500001', 'latitude': 17.3850, 'longitude': 78.4867},
+    'Kolkata': {'state': 'West Bengal', 'pincode': '700001', 'latitude': 22.5726, 'longitude': 88.3639}
 }
-VALID_CITIES = {
-    "Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Pune",
-    "Jaipur", "Surat", "Lucknow", "Kanpur", "Nagpur", "Indore", "Bhopal", "Patna", "Thane"
-}
+
+VALID_STATES = set(val['state'] for val in DEFAULT_CITY_DATA.values())
+VALID_CITIES = set(DEFAULT_CITY_DATA.keys())
 
 def is_valid_indian_pincode(pin):
-    return bool(re.match(r'^[1-9][0-9]{5}$', str(pin)))
+    return bool(re.match(r'^[1-9][0-9]{5}$', str(pin).strip()))
 
-# --- Google Geocoding ---
+def apply_default_values(city, state, pincode, lat, lon):
+    notes = []
+    if city in DEFAULT_CITY_DATA:
+        defaults = DEFAULT_CITY_DATA[city]
+        if not state:
+            state = defaults['state']
+            notes.append("Default state")
+        if not is_valid_indian_pincode(pincode):
+            pincode = defaults['pincode']
+            notes.append("Default PIN")
+        if not lat:
+            lat = defaults['latitude']
+            notes.append("Default latitude")
+        if not lon:
+            lon = defaults['longitude']
+            notes.append("Default longitude")
+        return city, state, pincode, lat, lon, notes
+    return city, state, pincode, lat, lon, []
+
+# ---------------------------------------------
+# GEO APIs
+# ---------------------------------------------
 def geocode_address_google(address, api_key):
-    params = {'address': address + ", India", 'key': api_key}
+    params = {'address': address + ', India', 'key': api_key}
     try:
-        response = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
-        data = response.json()
-        if data.get("status") == "OK":
-            loc = data['results'][0]['geometry']['location']
+        r = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params)
+        d = r.json()
+        if d.get("status") == "OK":
+            loc = d['results'][0]['geometry']['location']
             return loc['lat'], loc['lng'], True
     except:
         pass
     return None, None, False
 
-def reverse_geocode_google(lat, lon, api_key):
-    params = {'latlng': f'{lat},{lon}', 'key': api_key}
-    try:
-        response = requests.get('https://maps.googleapis.com/maps/api/geocode/json', params=params)
-        data = response.json()
-        if data.get("status") == "OK":
-            city, state, pin = None, None, None
-            for comp in data['results'][0]['address_components']:
-                if 'locality' in comp['types'] or 'sublocality' in comp['types']:
-                    city = city or comp['long_name']
-                if 'administrative_area_level_1' in comp['types']:
-                    state = state or comp['long_name']
-                if 'postal_code' in comp['types']:
-                    pin = pin or comp['long_name']
-            return city, state, pin
-    except:
-        pass
-    return None, None, None
-
-# --- Mapbox Geocoding ---
 def geocode_address_mapbox(address, api_key):
-    import urllib.parse
-    query = urllib.parse.quote(address + ", India")
+    from urllib.parse import quote
+    query = quote(address + ", India")
     url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{query}.json"
-    params = {'access_token': api_key}
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if data.get('features'):
-            coords = data['features'][0]['geometry']['coordinates']  # [lon, lat]
+        r = requests.get(url, params={"access_token": api_key})
+        d = r.json()
+        if d.get("features"):
+            coords = d["features"][0]["geometry"]["coordinates"]  # [lon, lat]
             return coords[1], coords[0], True
     except:
         pass
     return None, None, False
 
-def reverse_geocode_mapbox(lat, lon, api_key):
-    url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
-    params = {'access_token': api_key}
+def reverse_geocode_google(lat, lon, api_key):
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
+        r = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
+                         params={"latlng": f"{lat},{lon}", "key": api_key})
+        d = r.json()
+        if d.get("status") == "OK":
+            city, state, pin = None, None, None
+            for comp in d["results"][0]["address_components"]:
+                types = comp["types"]
+                if "locality" in types or "sublocality" in types:
+                    city = comp["long_name"]
+                if "administrative_area_level_1" in types:
+                    state = comp["long_name"]
+                if "postal_code" in types:
+                    pin = comp["long_name"]
+            return city, state, pin
+    except:
+        pass
+    return None, None, None
+
+def reverse_geocode_mapbox(lat, lon, api_key):
+    try:
+        url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
+        r = requests.get(url, params={"access_token": api_key})
+        d = r.json()
         city, state, pin = None, None, None
-        if data.get('features'):
-            for feat in data['features']:
-                types = feat.get('place_type', [])
-                if 'place' in types and not city:
-                    city = feat['text']
-                if 'region' in types and not state:
-                    state = feat['text']
-                if 'postcode' in types and not pin:
-                    pin = feat['text']
+        for feat in d.get("features", []):
+            types = feat["place_type"]
+            if "place" in types and not city:
+                city = feat["text"]
+            if "region" in types and not state:
+                state = feat["text"]
+            if "postcode" in types and not pin:
+                pin = feat["text"]
         return city, state, pin
     except:
         pass
     return None, None, None
 
-# --- Row Processor ---
+# ---------------------------------------------
+# ENRICHMENT FUNCTION
+# ---------------------------------------------
 def validate_and_enrich(row, address_column, provider, api_key):
-    address = row.get(address_column, "") or ""
-    city = row.get("City", "") or ""
-    state = row.get("State", "") or ""
-    pin = str(row.get("Postal Code", "") or "")
+    address = str(row.get(address_column, "")).strip()
+    city = str(row.get("City", "")).strip()
+    state = str(row.get("State", "")).strip()
+    pin = str(row.get("Postal Code", "")).strip()
     lat = row.get("Latitude", None)
     lon = row.get("Longitude", None)
 
     notes = []
     used_fallback = False
 
-    # Step 1: Geocode if lat/lon missing
+    # Geocode if needed
     if not lat or not lon:
         if provider == "Google Maps":
-            lat1, lon1, success = geocode_address_google(address, api_key)
+            lat, lon, success = geocode_address_google(address, api_key)
         else:
-            lat1, lon1, success = geocode_address_mapbox(address, api_key)
+            lat, lon, success = geocode_address_mapbox(address, api_key)
         if success:
-            lat, lon = lat1, lon1
-            notes.append("Lat/Lon from geocoding")
             used_fallback = True
+            notes.append("Lat/Lon from geocode")
 
-    # Step 2: Reverse geocode if city/state/pincode is missing or invalid
-    city_valid = city in VALID_CITIES
-    state_valid = state in VALID_STATES
-    pin_valid = is_valid_indian_pincode(pin)
-
-    if lat and lon and (not city_valid or not state_valid or not pin_valid):
+    # Reverse geocode if needed
+    if lat and lon:
         if provider == "Google Maps":
-            rev_city, rev_state, rev_pin = reverse_geocode_google(lat, lon, api_key)
+            r_city, r_state, r_pin = reverse_geocode_google(lat, lon, api_key)
         else:
-            rev_city, rev_state, rev_pin = reverse_geocode_mapbox(lat, lon, api_key)
+            r_city, r_state, r_pin = reverse_geocode_mapbox(lat, lon, api_key)
 
-        if not city_valid and rev_city in VALID_CITIES:
-            city = rev_city
-            notes.append("City updated via reverse geocode")
-        if not state_valid and rev_state in VALID_STATES:
-            state = rev_state
-            notes.append("State updated via reverse geocode")
-        if not pin_valid and is_valid_indian_pincode(rev_pin):
-            pin = rev_pin
-            notes.append("PIN updated via reverse geocode")
+        if not city and r_city:
+            city = r_city
+            notes.append("City from reverse")
+        if not state and r_state:
+            state = r_state
+            notes.append("State from reverse")
+        if not pin or not is_valid_indian_pincode(pin):
+            if is_valid_indian_pincode(r_pin):
+                pin = r_pin
+                notes.append("PIN from reverse")
+
+    # Final fallback: defaults
+    city, state, pin, lat, lon, default_notes = apply_default_values(city, state, pin, lat, lon)
+    notes += default_notes
+    used_defaults = bool(default_notes)
 
     return {
         "Latitude": lat,
@@ -142,73 +164,66 @@ def validate_and_enrich(row, address_column, provider, api_key):
         "City": city,
         "State": state,
         "Used_Fallback": used_fallback,
+        "Used_Default": used_defaults,
         "Correction_Notes": ", ".join(notes) if notes else "No changes",
-        "Status": "Success" if lat and lon else "Partial/Failed"
+        "Status": "Success" if lat and lon and city and state and pin else "Incomplete"
     }
 
-# --- Parallel Batch Processor ---
-def process_addresses(df, address_column, provider, api_key, max_threads):
+# ---------------------------------------------
+# PARALLEL PROCESSING
+# ---------------------------------------------
+def process_addresses(df, address_col, provider, api_key, max_threads):
     results = [None] * len(df)
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {
-            executor.submit(validate_and_enrich, row, address_column, provider, api_key): idx
+            executor.submit(validate_and_enrich, row, address_col, provider, api_key): idx
             for idx, row in df.iterrows()
         }
         progress = st.progress(0)
-        for counter, future in enumerate(as_completed(futures)):
+        for count, future in enumerate(as_completed(futures)):
             idx = futures[future]
             try:
                 results[idx] = future.result()
             except Exception as e:
-                results[idx] = {
-                    "Status": "Failed",
-                    "Error": str(e)
-                }
-            progress.progress((counter + 1) / len(df))
+                results[idx] = {"Status": "Failed", "Error": str(e)}
+            progress.progress((count + 1) / len(df))
     return pd.DataFrame(results)
 
-# --- Streamlit UI ---
+# ---------------------------------------------
+# STREAMLIT UI
+# ---------------------------------------------
+st.title("🇮🇳 India Address Validator")
 st.markdown("""
-Upload an Excel file containing Indian addresses.
-
-- Select your geocoding provider (Google Maps or Mapbox)
-- Enter your API key or token
-- Select the address column
-- The tool will enrich and validate Indian addresses using Indian city/state/PIN logic
+Upload Excel 📄 > Select provider (Google Maps / Mapbox) > Enrich & Validate Indian address data.
 """)
 
-provider = st.selectbox("Select Geocoding Provider", ["Google Maps", "Mapbox"])
-api_key = st.text_input(
-    f"Enter your {provider} API Key/Token", value="", type="password"
-)
+provider = st.selectbox("🌐 Select Geocoding Provider", ["Google Maps", "Mapbox"])
+api_key = st.text_input("🔑 Enter your API Key / Token", type="password")
+
 if not api_key:
-    st.warning("Please enter a valid API key/token to continue.")
+    st.warning("No API key provided.")
     st.stop()
 
-uploaded_file = st.file_uploader("📤 Upload Excel file", type=["xlsx"])
-
+uploaded_file = st.file_uploader("📂 Upload your Excel file (.xlsx)", type=["xlsx"])
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    st.success("File uploaded successfully ✅")
+    st.success("✅ File uploaded. Preview:")
     st.dataframe(df.head())
 
-    address_column = st.selectbox("📌 Select the address column:", df.columns)
-    threads = st.slider("⚙️ Set number of parallel workers", 2, 20, 10)
+    address_col = st.selectbox("📌 Select the address column:", df.columns)
+    threads = st.slider("⚙️ Number of Parallel Threads", 2, 20, value=10)
 
-    if st.button("🚀 Start Address Validation"):
-        st.info("Processing, please wait ⌛...")
-        results_df = process_addresses(df, address_column, provider, api_key, threads)
-        final_df = pd.concat([df.reset_index(drop=True), results_df], axis=1)
+    if st.button("🚀 Start Enrichment"):
+        st.info("Processing... please wait ⏳")
+        enriched_df = process_addresses(df, address_col, provider, api_key, threads)
+        final_df = pd.concat([df.reset_index(drop=True), enriched_df], axis=1)
         st.success("🎉 Done!")
         st.dataframe(final_df.head())
 
-        excel_output = BytesIO()
-        final_df.to_excel(excel_output, index=False)
-        excel_output.seek(0)
-
-        st.download_button(
-            "⬇️ Download Results",
-            data=excel_output,
-            file_name="validated_indian_addresses.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        # Download
+        out = BytesIO()
+        final_df.to_excel(out, index=False)
+        out.seek(0)
+        st.download_button("⬇️ Download Results", data=out,
+                           file_name="indian_enriched_addresses.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
