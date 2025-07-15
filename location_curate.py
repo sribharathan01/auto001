@@ -148,7 +148,7 @@ def process_addresses(df, address_column, api_key, max_workers=10):
 # --- STREAMLIT UI ---
 st.title("🗺️ Bulk Address Validation, Geocoding & Reverse Cleanup")
 
-api_key = st.text_input("AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc", type="password")
+api_key = st.text_input("🔐 Enter your Google Maps API Key", type="password")
 
 st.markdown("""
 Upload a file with addresses, and we’ll enrich missing City, State, Postal Code using:
