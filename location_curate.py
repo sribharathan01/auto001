@@ -38,7 +38,7 @@ def apply_default_values(city, state, pincode, lat, lon):
             notes.append("Default longitude")
     return city, state, pincode, lat, lon, notes
 
-# --- Provider Functions (Google, HERE, Mapbox, Mappls, Nominatim, OpenCage, Offline) ---
+# --- Provider Functions ---
 def geocode_google(address, api_key):
     params = {'address': address + ', India', 'key': api_key}
     try:
@@ -65,6 +65,37 @@ def reverse_google(lat, lon, api_key):
                 state = comp["long_name"]
             if "postal_code" in types:
                 pin = comp["long_name"]
+        return city, state, pin
+    except:
+        return None, None, None
+
+def geocode_mapbox(address, token):
+    from urllib.parse import quote
+    url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{quote(address + ', India')}.json"
+    try:
+        r = requests.get(url, params={"access_token": token})
+        d = r.json()
+        if d.get("features"):
+            coords = d["features"][0]["geometry"]["coordinates"]
+            return coords[1], coords[0], True
+    except:
+        pass
+    return None, None, False
+
+def reverse_mapbox(lat, lon, token):
+    try:
+        url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
+        r = requests.get(url, params={"access_token": token})
+        data = r.json()
+        city, state, pin = None, None, None
+        for feature in data.get("features", []):
+            pt = feature["place_type"]
+            if 'place' in pt and not city:
+                city = feature["text"]
+            if 'region' in pt and not state:
+                state = feature["text"]
+            if 'postcode' in pt and not pin:
+                pin = feature["text"]
         return city, state, pin
     except:
         return None, None, None
@@ -98,10 +129,16 @@ def reverse_here(lat, lon, api_key):
         pass
     return None, None, None
 
-# ... (Add Mapbox, Mappls, Nominatim, OpenCage, Offline as in previous examples)
+def geocode_ola(address, api_key):
+    # Placeholder: Replace with actual OLA Maps API when available
+    return None, None, False
+
+def reverse_ola(lat, lon, api_key):
+    # Placeholder: Replace with actual OLA Maps API when available
+    return None, None, None
 
 # --- Main Enrichment Function ---
-def validate_and_enrich(row, address_col, provider, credentials, pin_df=None):
+def validate_and_enrich(row, address_col, provider, credentials):
     address = str(row.get(address_col, '')).strip()
     city = str(row.get('City', '')).strip()
     state = str(row.get('State', '')).strip()
@@ -114,9 +151,12 @@ def validate_and_enrich(row, address_col, provider, credentials, pin_df=None):
     if not lat or not lon:
         if provider == "Google Maps":
             lat, lon, success = geocode_google(address, credentials['key'])
+        elif provider == "Mapbox":
+            lat, lon, success = geocode_mapbox(address, credentials['key'])
         elif provider == "HERE Maps":
             lat, lon, success = geocode_here(address, credentials['key'])
-        # ... (repeat for other providers)
+        elif provider == "OLA Maps":
+            lat, lon, success = geocode_ola(address, credentials['key'])
         else:
             success = False
         if success:
@@ -128,9 +168,12 @@ def validate_and_enrich(row, address_col, provider, credentials, pin_df=None):
     if lat and lon and (not city_ok or not state_ok or not pin_ok):
         if provider == "Google Maps":
             r_city, r_state, r_pin = reverse_google(lat, lon, credentials['key'])
+        elif provider == "Mapbox":
+            r_city, r_state, r_pin = reverse_mapbox(lat, lon, credentials['key'])
         elif provider == "HERE Maps":
             r_city, r_state, r_pin = reverse_here(lat, lon, credentials['key'])
-        # ... (repeat for other providers)
+        elif provider == "OLA Maps":
+            r_city, r_state, r_pin = reverse_ola(lat, lon, credentials['key'])
         else:
             r_city, r_state, r_pin = None, None, None
 
@@ -162,26 +205,36 @@ def validate_and_enrich(row, address_col, provider, credentials, pin_df=None):
         "Status": "Success" if lat and lon and city and state and pin else "Incomplete"
     }
 
+# --- Parallel Processing ---
+def process_addresses(df, address_col, provider, credentials, max_threads):
+    results = [None] * len(df)
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {
+            executor.submit(validate_and_enrich, row, address_col, provider, credentials): idx
+            for idx, row in df.iterrows()
+        }
+        progress = st.progress(0)
+        for count, future in enumerate(as_completed(futures)):
+            idx = futures[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = {"Status": "Failed", "Error": str(e)}
+            progress.progress((count + 1) / len(df))
+    return pd.DataFrame(results)
+
 # --- Streamlit UI ---
-st.title("🇮🇳 India Address Validator (Multi-Provider)")
+st.title("India Address Validator")
 st.markdown("""
-Upload Excel 📄 > Select provider (Google Maps, HERE Maps, etc.) > Enrich & Validate Indian address data.
+Upload Excel 📄 > Select provider (Google Maps, Mapbox, HERE Maps, OLA Maps) > Enrich & Validate Indian address data.
 """)
 
 provider = st.selectbox("🌐 Select Geocoding Provider", [
-    "Google Maps", "HERE Maps", "Mapbox", "Mappls", "Nominatim", "OpenCage", "Offline"
+    "Google Maps", "Mapbox", "HERE Maps", "OLA Maps"
 ])
 credentials = {}
-if provider == "Google Maps":
-    credentials['key'] = st.text_input("Google Maps API Key", type="password")
-elif provider == "HERE Maps":
-    credentials['key'] = st.text_input("HERE Maps API Key", type="password")
-# ... (repeat for other providers)
-elif provider == "Offline":
-    pin_file = st.file_uploader("Upload Indian PIN code CSV (pincode,city,state,latitude,longitude)", type=["csv"])
-    pin_df = pd.read_csv(pin_file) if pin_file else None
-else:
-    pin_df = None
+if provider in ["Google Maps", "Mapbox", "HERE Maps", "OLA Maps"]:
+    credentials['key'] = st.text_input(f"{provider} API Key", type="password")
 
 uploaded_file = st.file_uploader("📤 Upload your Excel file (.xlsx)", type=["xlsx"])
 if uploaded_file:
@@ -192,11 +245,10 @@ if uploaded_file:
     address_col = st.selectbox("📌 Select the address column:", df.columns)
     threads = st.slider("⚙️ Number of Parallel Threads", 2, 20, value=10)
 
-    if st.button("🚀 Start Enrichment"):
+    if st.button("🚀 Start processing"):
         st.info("Processing... please wait ⏳")
         result_df = process_addresses(
-            df, address_col, provider, credentials, threads,
-            pin_df if provider == "Offline" else None
+            df, address_col, provider, credentials, threads
         )
         final_df = pd.concat([df.reset_index(drop=True), result_df], axis=1)
         st.success("🎉 Done!")
