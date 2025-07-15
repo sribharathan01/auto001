@@ -7,189 +7,160 @@ import re
 from io import BytesIO
 
 # --- CONFIGURATION ---
-API_KEY = 'AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc'  # Replace with your actual API Key
-VALIDATION_ENDPOINT = f'https://addressvalidation.googleapis.com/v1:validateAddress?key={API_KEY}'
+API_KEY = 'AIzaSyBfDa2M6G1JL5kHImqfs9517i6g_9KXwvc'  # 🎯 Replace this with your actual Google Maps API key
 GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json'
 REVERSE_GEOCODE_ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json'
 
-# --- STATIC REFERENCE ---
-VALID_STATES = {
-    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa",
-    "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala",
-    "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland",
-    "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura",
-    "Uttar Pradesh", "Uttarakhand", "West Bengal", "Delhi", "Puducherry", "Chandigarh",
-    "Jammu and Kashmir", "Ladakh", "Andaman and Nicobar Islands", "Dadra and Nagar Haveli and Daman and Diu"
-}
-VALID_CITIES = {
-    "Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Pune",
-    "Jaipur", "Surat", "Lucknow", "Kanpur", "Nagpur", "Indore", "Thane", "Bhopal", "Patna"
-}
-
 
 # --- HELPERS ---
-def is_valid_indian_pincode(pin):
-    return bool(re.match(r'^[1-9][0-9]{5}$', str(pin)))
+def geocode_address_from_fields(address, city, state, postal_code, country):
+    """
+    Try to geocode using whatever address components are available.
+    """
+    components = [address, city, state, postal_code, country]
+    query = ', '.join([str(part).strip() for part in components if part])
+    params = {'address': query, 'key': API_KEY}
 
-
-def geocode_address(address):
-    params = {'address': address, 'key': API_KEY}
     try:
-        r = requests.get(GEOCODE_ENDPOINT, params=params)
-        d = r.json()
-        if d.get("status") == "OK":
-            result = d["results"][0]
-            loc = result["geometry"]["location"]
-            return loc["lat"], loc["lng"], True
+        res = requests.get(GEOCODE_ENDPOINT, params=params)
+        data = res.json()
+        if data.get('status') == 'OK' and data['results']:
+            loc = data['results'][0]['geometry']['location']
+            return loc.get('lat'), loc.get('lng'), True
     except Exception:
         pass
     return None, None, False
 
 
 def reverse_geocode(lat, lon):
+    """Convert latitude and longitude to address components."""
     try:
         params = {'latlng': f'{lat},{lon}', 'key': API_KEY}
-        r = requests.get(REVERSE_GEOCODE_ENDPOINT, params=params)
-        d = r.json()
-        if d.get("status") == "OK":
-            components = d["results"][0]["address_components"]
-            city, state, pincode = None, None, None
-            for c in components:
-                if 'locality' in c['types'] or 'sublocality' in c['types']:
-                    city = city or c['long_name']
-                if 'administrative_area_level_1' in c['types']:
-                    state = c['long_name']
-                if 'postal_code' in c['types']:
-                    pincode = c['long_name']
-            return city, state, pincode
+        res = requests.get(REVERSE_GEOCODE_ENDPOINT, params=params)
+        data = res.json()
+        if data.get('status') == 'OK' and data['results']:
+            components = data['results'][0]['address_components']
+            city, state, postal, country = None, None, None, None
+            for comp in components:
+                if 'locality' in comp['types'] or 'sublocality' in comp['types']:
+                    city = city or comp['long_name']
+                if 'administrative_area_level_1' in comp['types']:
+                    state = comp['long_name']
+                if 'postal_code' in comp['types']:
+                    postal = comp['long_name']
+                if 'country' in comp['types']:
+                    country = comp['long_name']
+            return city, state, postal, country
     except Exception:
         pass
-    return None, None, None
+    return None, None, None, None
 
 
-# --- VALIDATE + CORRECT FUNCTION ---
+# --- MAIN VALIDATION FUNCTION ---
 def validate_and_enrich(row):
-    address = str(row.get("Address", "")).strip()
-    city = row.get("City", None)
-    state = row.get("State", None)
-    pin = str(row.get("Postal Code")) if pd.notna(row.get("Postal Code")) else None
+    address = row.get("Address", "") or ""
+    city = row.get("City", "") or ""
+    state = row.get("State", "") or ""
+    postal = row.get("Postal Code", "") or ""
+    country = row.get("Country", "") or ""
     lat = row.get("Latitude")
     lon = row.get("Longitude")
 
     notes = []
-    fallback_used = False
+    used_fallback = False
 
-    # Step 1: Use full address to get lat/lon
-    if (not lat or not lon):
-        lat1, lon1, ok = geocode_address(address)
-        if ok:
+    # Step 1: If lat/lon is missing, try to geocode full address
+    if not lat or not lon:
+        lat1, lon1, success = geocode_address_from_fields(address, city, state, postal, country)
+        if success:
             lat, lon = lat1, lon1
-            fallback_used = True
-            notes.append("Lat/Lon from full address")
+            used_fallback = True
+            notes.append("Lat/Lon from geocoding all fields")
 
-    # Step 2: Reverse geocode from lat/lon to fill missing or invalid data
+    # Step 2: If lat/lon exists but other fields missing, try reverse geocoding
     if lat and lon:
-        rev_city, rev_state, rev_pin = reverse_geocode(lat, lon)
+        r_city, r_state, r_postal, r_country = reverse_geocode(lat, lon)
 
-        if not is_valid_indian_pincode(pin) and is_valid_indian_pincode(rev_pin):
-            pin = rev_pin
-            notes.append("PIN from lat/lon")
+        if not city and r_city:
+            city = r_city
+            notes.append("City from reverse geocoding")
 
-        if city not in VALID_CITIES and rev_city in VALID_CITIES:
-            city = rev_city
-            notes.append("City from lat/lon")
+        if not state and r_state:
+            state = r_state
+            notes.append("State from reverse geocoding")
 
-        if state not in VALID_STATES and rev_state in VALID_STATES:
-            state = rev_state
-            notes.append("State from lat/lon")
+        if not postal and r_postal:
+            postal = r_postal
+            notes.append("Postal Code from reverse geocoding")
 
-    # Step 3: Try using PIN + state to get lat/lon if still missing
-    if (not lat or not lon) and is_valid_indian_pincode(pin) and state:
-        fallback_address = f"{pin}, {state}, India"
-        lat2, lon2, ok2 = geocode_address(fallback_address)
-        if ok2:
-            lat, lon = lat2, lon2
-            notes.append("Lat/Lon from PIN+State")
-            fallback_used = True
-
-    # Step 4: Try using city + state if lat/lon still missing
-    if (not lat or not lon) and city and state:
-        fallback_address = f"{city}, {state}, India"
-        lat3, lon3, ok3 = geocode_address(fallback_address)
-        if ok3:
-            lat, lon = lat3, lon3
-            notes.append("Lat/Lon from City+State")
-            fallback_used = True
+        if not country and r_country:
+            country = r_country
+            notes.append("Country from reverse geocoding")
 
     return {
-        "City": city,
-        "State": state,
-        "Postal Code": pin,
         "Latitude": lat,
         "Longitude": lon,
-        "Used_Fallback": fallback_used,
-        "Correction_Notes": ", ".join(notes) if notes else "Original data used",
+        "City": city,
+        "State": state,
+        "Postal Code": postal,
+        "Country": country,
+        "Used_Fallback": used_fallback,
+        "Correction_Notes": ", ".join(notes) if notes else "No correction needed",
         "Status": "Success" if lat and lon else "Partial/Failed"
     }
 
 
-# --- GEOCODING WORKER ---
+# --- MULTI-THREAD WORKER ---
 def process_addresses(df, address_col, max_workers):
     results = [None] * len(df)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(validate_and_enrich, row): idx for idx, row in df.iterrows()}
         progress = st.progress(0)
-        completed = 0
-        for future in as_completed(futures):
+        for count, future in enumerate(as_completed(futures)):
             idx = futures[future]
             try:
                 result = future.result()
             except Exception as e:
                 result = {"Status": "Failed", "Error": str(e)}
             results[idx] = result
-            completed += 1
-            progress.progress(completed / len(df))
-    return results
+            progress.progress((count + 1) / len(df))
+    return pd.DataFrame(results)
 
 
 # --- STREAMLIT UI ---
 st.set_page_config(layout="wide")
-st.title("📍 Address Validation & Enrichment (India)")
+st.title("🌍 Global Address Validator & Enricher")
 
 st.markdown("""
-Upload Excel containing addresses (address, city, state, zip code columns).  
+Upload an Excel file with addresses to enrich missing values like:
+- 📌 Latitude / Longitude
+- 🏙 City, State
+- 🌎 Country and Postal Code
 
-This app will:
-- ✅ Enrich missing ZIPs, cities, states using lat/lon
-- ↔ Fill missing lat/lon using address or city/state/zip
-- 🧠 Validate and fix wrong data with reverse geocoding
+Powered by Google Maps APIs 🌐  
+Note: You **must enter your API key** in the script for this to work.
 
-**Note:** Google Maps API key required. Quotas may apply.
 """, unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("📤 Upload Excel File", type=["xlsx"])
-column_input = st.text_input("Address column name", value="Address")
-max_workers = st.slider("🔄 Parallel workers", 1, 20, 10)
+uploaded_file = st.file_uploader("📂 Upload Excel file", type=["xlsx"])
+address_col = st.text_input("📬 Column name for full address:", value="Address")
+max_workers = st.slider("🚀 Parallel threads", 2, 20, 10)
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    st.write("✅ Sample uploaded data:", df.head())
+    st.write("📄 File loaded. Preview below:")
+    st.dataframe(df.head())
 
-    if st.button("🚀 Start Processing"):
-        st.info("Processing started...")
-        results = process_addresses(df, column_input, max_workers)
-        results_df = pd.DataFrame(results)
-        final = pd.concat([df.reset_index(drop=True), results_df], axis=1)
-
-        st.success("🎉 Processing complete!")
-        st.write(final.head())
+    if st.button("▶️ Start Validation"):
+        st.info("Working... Please wait.")
+        result_df = process_addresses(df, address_col, max_workers)
+        final_df = pd.concat([df.reset_index(drop=True), result_df], axis=1)
+        st.success("✅ Done!")
+        st.dataframe(final_df.head())
 
         output = BytesIO()
-        final.to_excel(output, index=False)
+        final_df.to_excel(output, index=False)
         output.seek(0)
-        st.download_button(
-            label="📥 Download Results as Excel",
-            data=output,
-            file_name="enriched_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+
+        st.download_button("⬇️ Download Result", data=output, file_name="validated_addresses.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
