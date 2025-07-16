@@ -248,4 +248,17 @@ if file:
                 results[idx] = future.result()
                 progress.progress((count + 1) / len(df))
 
-        result_df = pd.concat([df.reset_index(drop=True
+        result_df = pd.concat([df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
+        st.success("✅ Enrichment Complete")
+
+        # ✅ Output Preview!
+        st.subheader("📄 Preview of Enriched Output")
+        st.dataframe(result_df.head())
+        st.write(f"👁️ Showing 5 of {len(result_df)} records")
+
+        output = BytesIO()
+        result_df.to_excel(output, index=False)
+        output.seek(0)
+        st.download_button("📥 Download Enriched Excel", data=output,
+                           file_name="enriched_addresses.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
