@@ -1,4 +1,4 @@
-# ... [same imports]
+# -- Existing imports
 import streamlit as st
 import pandas as pd
 import requests
@@ -39,9 +39,9 @@ def apply_fallbacks(city, state, pin, lat, lon):
             notes.append("Default Lon")
     return city, state, pin, lat, lon, notes
 
-# -------------------- Geocoding APIs --------------------
+# -------------------- Provider APIs --------------------
 
-# Google Maps
+# -- Google
 def geocode_google(address, key):
     try:
         r = requests.get("https://maps.googleapis.com/maps/api/geocode/json",
@@ -50,8 +50,7 @@ def geocode_google(address, key):
         if d.get("results"):
             loc = d["results"][0]["geometry"]["location"]
             return loc["lat"], loc["lng"], True
-    except:
-        pass
+    except: pass
     return None, None, False
 
 def reverse_google(lat, lon, key):
@@ -68,20 +67,18 @@ def reverse_google(lat, lon, key):
             if "postal_code" in c["types"]:
                 pin = c["long_name"]
         return city, state, pin
-    except:
-        return None, None, None
+    except: return None, None, None
 
-# HERE Maps
+# -- HERE
 def geocode_here(address, key):
     try:
         r = requests.get("https://geocode.search.hereapi.com/v1/geocode",
-                         params={"q": address + ", India", "apiKey": key})
+                         params={"q": address, "apiKey": key})
         d = r.json()
         if d.get("items"):
             pos = d["items"][0]["position"]
             return pos["lat"], pos["lng"], True
-    except:
-        pass
+    except: pass
     return None, None, False
 
 def reverse_here(lat, lon, key):
@@ -90,10 +87,9 @@ def reverse_here(lat, lon, key):
                          params={"at": f"{lat},{lon}", "apiKey": key})
         addr = r.json()["items"][0]["address"]
         return addr.get("city"), addr.get("state"), addr.get("postalCode")
-    except:
-        return None, None, None
+    except: return None, None, None
 
-# Mapbox
+# -- Mapbox
 def geocode_mapbox(address, key):
     try:
         from urllib.parse import quote
@@ -104,29 +100,26 @@ def geocode_mapbox(address, key):
         if data.get("features"):
             coords = data["features"][0]["geometry"]["coordinates"]
             return coords[1], coords[0], True
-    except:
-        pass
+    except: pass
     return None, None, False
 
 def reverse_mapbox(lat, lon, key):
     try:
         r = requests.get(f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json",
-                         params={"access_token": key})
-        data = r.json()
+                         params={"access_token": key}).json()
         city, state, pin = None, None, None
-        for f in data.get("features", []):
+        for f in r.get("features", []):
             pt = f["place_type"]
             if "place" in pt and not city:
                 city = f["text"]
-            elif "region" in pt and not state:
+            if "region" in pt and not state:
                 state = f["text"]
-            elif "postcode" in pt and not pin:
+            if "postcode" in pt and not pin:
                 pin = f["text"]
         return city, state, pin
-    except:
-        return None, None, None
+    except: return None, None, None
 
-# Ola Maps
+# -- Ola Maps
 def geocode_ola(address, key):
     try:
         r = requests.get("https://api.olamaps.io/places/v1/geocode",
@@ -135,8 +128,7 @@ def geocode_ola(address, key):
         if data.get("results"):
             loc = data["results"][0]["geometry"]["location"]
             return float(loc["lat"]), float(loc["lng"]), True
-    except:
-        pass
+    except: pass
     return None, None, False
 
 def reverse_ola(lat, lon, key):
@@ -146,37 +138,30 @@ def reverse_ola(lat, lon, key):
         data = r.json()
         comp = data.get("results", [])[0].get("address_components", {})
         return comp.get("city"), comp.get("state"), comp.get("postal_code")
-    except:
-        return None, None, None
+    except: return None, None, None
 
 # ✅ OpenCage
 def geocode_opencage(address, key):
     try:
-        url = "https://api.opencagedata.com/geocode/v1/json"
-        params = {"q": f"{address}, India", "key": key}
-        r = requests.get(url, params=params)
+        r = requests.get("https://api.opencagedata.com/geocode/v1/json",
+                         params={"q": f"{address}, India", "key": key})
         d = r.json()
         if d.get("results"):
-            coord = d["results"][0]["geometry"]
-            return coord["lat"], coord["lng"], True
-    except:
-        pass
+            g = d["results"][0]["geometry"]
+            return g["lat"], g["lng"], True
+    except: pass
     return None, None, False
 
 def reverse_opencage(lat, lon, key):
     try:
-        url = "https://api.opencagedata.com/geocode/v1/json"
-        params = {"q": f"{lat},{lon}", "key": key}
-        r = requests.get(url, params=params)
+        r = requests.get("https://api.opencagedata.com/geocode/v1/json",
+                         params={"q": f"{lat},{lon}", "key": key})
         comps = r.json()["results"][0]["components"]
         city = comps.get("city") or comps.get("town") or comps.get("village")
-        state = comps.get("state")
-        pin = comps.get("postcode")
-        return city, state, pin
-    except:
-        return None, None, None
+        return city, comps.get("state"), comps.get("postcode")
+    except: return None, None, None
 
-# -------------------- Enrichment Function --------------------
+# ------------------------- Enrichment ------------------------
 
 def enrich(row, address_col, provider, key):
     address = str(row.get(address_col, '')).strip()
@@ -202,7 +187,9 @@ def enrich(row, address_col, provider, key):
             used_fallback = True
             notes.append("Lat/Lon enriched")
 
-    city_ok, state_ok, pin_ok = city in VALID_CITIES, state in VALID_STATES, is_valid_indian_pincode(pin)
+    city_ok = city in VALID_CITIES
+    state_ok = state in VALID_STATES
+    pin_ok = is_valid_indian_pincode(pin)
     if lat and lon and (not city_ok or not state_ok or not pin_ok):
         if provider == "Google Maps":
             r_city, r_state, r_pin = reverse_google(lat, lon, key)
@@ -225,46 +212,40 @@ def enrich(row, address_col, provider, key):
             pin = r_pin
             notes.append("PIN from reverse")
 
-    city, state, pin, lat, lon, fb_notes = apply_fallbacks(city, state, pin, lat, lon)
-    notes += fb_notes
+    city, state, pin, lat, lon, fallback_notes = apply_fallbacks(city, state, pin, lat, lon)
+    notes += fallback_notes
 
     return {
         "Latitude": lat, "Longitude": lon, "City": city, "State": state,
         "Postal Code": pin, "Used_Fallback": used_fallback,
         "Correction_Notes": ", ".join(notes),
-        "Status": "Success" if lat and city and state and pin else "Failed"
+        "Status": "Success" if all([lat, lon, city, state, pin]) else "Failed"
     }
 
-# -------------------- Streamlit App --------------------
+# ------------------------- UI ------------------------
 
 st.set_page_config(layout="wide")
-st.title("📍 India Address Enricher (Google, HERE, Mapbox, OLA, OpenCage)")
-
-provider = st.selectbox("🌐 Select Provider", ["Google Maps", "HERE Maps", "Mapbox", "OLA Maps", "OpenCage"])
-api_key = st.text_input(f"🔑 Enter your API Key for {provider}", type="password")
-
+st.title("📍 Address Validator with Google, HERE, Mapbox, Ola, OpenCage")
+provider = st.selectbox("🌎 Select Provider", ["Google Maps", "HERE Maps", "Mapbox", "OLA Maps", "OpenCage"])
+api_key = st.text_input(f"🔐 API Key for {provider}", type="password")
 file = st.file_uploader("📂 Upload Excel File", type=["xlsx"])
-threads = st.slider("⚙️ Worker Threads", 2, 20, 10)
+threads = st.slider("⚙️ Threads", 2, 20, 10)
 
 if file:
     df = pd.read_excel(file)
-    st.success("✅ File Loaded")
+    st.success("✅ File loaded")
     st.dataframe(df.head())
-    addr_col = st.selectbox("🧭 Select Address Column", df.columns)
+    addr_col = st.selectbox("🏷️ Select Address Column", df.columns)
 
     if st.button("🚀 Start Enrichment"):
-        st.info("Processing...")
-        out = [None] * len(df)
+        st.info("🔄 Processing...")
+        results = [None] * len(df)
         with ThreadPoolExecutor(max_workers=threads) as exe:
-            futures = {exe.submit(enrich, row, addr_col, provider, api_key): i for i, row in df.iterrows()}
-            progress = st.progress(0)
-            for j, fut in enumerate(as_completed(futures)):
-                out[futures[fut]] = fut.result()
-                progress.progress((j + 1) / len(df))
-        result_df = pd.concat([df.reset_index(drop=True), pd.DataFrame(out)], axis=1)
-        st.success("🎉 Done")
-        output = BytesIO()
-        result_df.to_excel(output, index=False)
-        output.seek(0)
-        st.download_button("⬇️ Download XLSX", data=output,
-                           file_name="enriched_addresses.xlsx", mime="application/vnd.ms-excel")
+            futures = {exe.submit(enrich, r, addr_col, provider, api_key): i for i, r in df.iterrows()}
+            progress = st.progress(0.0)
+            for count, future in enumerate(as_completed(futures)):
+                idx = futures[future]
+                results[idx] = future.result()
+                progress.progress((count + 1) / len(df))
+
+        result_df = pd.concat([df.reset_index(drop=True
